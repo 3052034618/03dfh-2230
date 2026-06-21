@@ -3,8 +3,10 @@ const { BOXES, FLOW_LOGS, STATUS_DEF, CARRIERS, OWNERS, DESTS, PLATES, RESPONSIB
   FOLLOW_STATUS,
   getStatusCount, getRiskCount, getRouteBoxes, getOverdueBoxes,
   formatDT, formatD, diffDays, diffHours, isSameDay,
-  buildTimeline, setBoxPersist, clearAllPersist,
-  getShiftSummary, buildShiftText } = window.MOCK;
+  buildTimeline, setBoxPersist, setBoxFollowStatusOnly, clearAllPersist,
+  getShiftSummary, buildShiftText,
+  saveShiftLog, getShiftLogs, getShiftLogDates, getShiftLogsByDate,
+  getEscalatedBoxes, generateEscalationSpeech } = window.MOCK;
 
 const COLOR_MAP = {
   emerald: { bg: 'bg-emerald-50',  border: 'border-emerald-200',   text: 'text-emerald-700',  num: 'text-emerald-600', ring: 'ring-emerald-500', fill: 'bg-emerald-500', light: 'bg-emerald-100' },
@@ -106,6 +108,151 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
+// ==================== 复制剪贴板 ====================
+function copyToClipboard(text, successMsg = '已复制到剪贴板') {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => showToast(successMsg)).catch(() => fallbackCopy(text, successMsg));
+  } else {
+    fallbackCopy(text, successMsg);
+  }
+}
+function fallbackCopy(text, successMsg) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); showToast(successMsg); }
+  catch(e) { showToast('复制失败，请手动复制', 'error'); }
+  document.body.removeChild(ta);
+}
+
+// ==================== 升级提醒渲染 ====================
+function renderEscalation() {
+  const list = getEscalatedBoxes();
+  const countEl = document.getElementById('escalationCount');
+  const countOverdueEl = document.getElementById('escalationCountOverdue');
+  const listEl = document.getElementById('escalationList');
+  const listOverdueEl = document.getElementById('escalationListOverdue');
+
+  if (countEl) countEl.textContent = list.length;
+  if (countOverdueEl) countOverdueEl.textContent = list.length;
+
+  const html = list.length ? list.map(b => {
+    const isLost = b.followStatus === 'lost';
+    const c = isLost ? COLOR_MAP.red : COLOR_MAP.rose;
+    return `
+      <div class="p-3 rounded-lg border ${c.border} ${c.bg} flex items-start gap-2.5 cursor-pointer hover:shadow-sm" onclick="openDrawer('${b.id}')">
+        <div class="w-7 h-7 rounded-md ${c.light} ${c.text} flex items-center justify-center shrink-0">
+          ${isLost ? `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>` :
+          `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`}
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-slate-800 text-sm">${b.id}</span>
+            <span class="px-1.5 py-0.5 rounded text-xs font-medium ${c.bg} ${c.text}">${isLost ? '疑似丢失' : `逾期${b.overdueDays}天`}</span>
+          </div>
+          <div class="text-xs text-slate-600 mt-0.5 truncate">${b.owner} · ${b.responsible.name}</div>
+          <div class="text-xs text-slate-400 mt-0.5">${b.responsible.phone}</div>
+        </div>
+        <div class="text-slate-300">${ICONS.chevron}</div>
+      </div>
+    `;
+  }).join('') : `<div class="col-span-full p-6 text-center text-sm text-slate-400">暂无需升级的箱体 🎉</div>`;
+
+  if (listEl) listEl.innerHTML = html;
+  if (listOverdueEl) listOverdueEl.innerHTML = html;
+}
+
+function copyEscalationSpeech() {
+  copyToClipboard(generateEscalationSpeech(), '主管话术已复制');
+}
+
+// ==================== 交接班确认 & 记录簿 ====================
+function confirmShift() {
+  const entry = saveShiftLog('张磊', true);
+  showToast(`${entry.shift}已确认交接，记录已保存`);
+  renderOverview();
+}
+
+let currentShiftLogDate = null;
+
+function openShiftLogModal() {
+  document.getElementById('shiftLogModal').classList.remove('hidden');
+  document.getElementById('shiftLogModal').classList.add('flex');
+  const dates = getShiftLogDates();
+  if (!dates.length) {
+    document.getElementById('shiftLogDates').innerHTML = '<span class="text-sm text-slate-400">暂无交接记录</span>';
+    document.getElementById('shiftLogContent').innerHTML = `
+      <div class="text-center py-16 text-slate-400">
+        <div class="text-5xl mb-3">📋</div>
+        <div class="font-medium">暂无交接记录</div>
+        <div class="text-sm mt-1">点击"确认交接"后，记录会保存在这里</div>
+      </div>
+    `;
+    return;
+  }
+  // 默认选最新日期
+  if (!currentShiftLogDate || !dates.includes(currentShiftLogDate)) {
+    currentShiftLogDate = dates[0];
+  }
+  // 日期 Tab
+  document.getElementById('shiftLogDates').innerHTML = dates.map(d => {
+    const active = d === currentShiftLogDate;
+    return `
+      <button onclick="setShiftLogDate('${d}')"
+        class="px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors
+          ${active ? 'bg-cold-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">
+        ${d}
+      </button>
+    `;
+  }).join('');
+  renderShiftLogContent();
+}
+function closeShiftLogModal() {
+  document.getElementById('shiftLogModal').classList.add('hidden');
+  document.getElementById('shiftLogModal').classList.remove('flex');
+}
+function setShiftLogDate(d) {
+  currentShiftLogDate = d;
+  openShiftLogModal();
+}
+function renderShiftLogContent() {
+  const logs = getShiftLogsByDate(currentShiftLogDate);
+  const html = logs.length ? `
+    <div class="space-y-4">
+      ${logs.map(log => {
+        const s = log.summary || {};
+        return `
+          <div class="p-4 rounded-xl border ${log.confirmed ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-2">
+                <span class="px-2.5 py-1 rounded-full text-xs font-bold ${log.shift === '早班' ? 'bg-amber-100 text-amber-700' : 'bg-indigo-100 text-indigo-700'}">${log.shift}</span>
+                <span class="text-sm text-slate-700 font-medium">${log.time}</span>
+                <span class="text-xs text-slate-500">· 操作人 ${log.operator}</span>
+                ${log.confirmed ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500 text-white">✓ 已确认</span>' : ''}
+              </div>
+              <button onclick='copyToClipboard(\`${log.text.replace(/`/g, '\\`')}\`, "交接文案已复制")' class="text-xs text-cold-600 hover:underline">复制文案</button>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm mb-3">
+              <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">新增逾期</span><div class="font-bold text-red-600">${s.newlyOverdue || 0} 只</div></div>
+              <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">已催还</span><div class="font-bold text-blue-600">${s.calledToday || 0} 只</div></div>
+              <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">已安排返程</span><div class="font-bold text-emerald-600">${s.returningToday || 0} 只</div></div>
+              <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">疑似丢失</span><div class="font-bold text-rose-600">${s.lostToday || 0} 只</div></div>
+            </div>
+            <details class="text-xs text-slate-600">
+              <summary class="cursor-pointer text-cold-600 hover:underline select-none">查看完整交接文案</summary>
+              <pre class="mt-2 p-3 bg-white rounded-lg border border-slate-100 text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">${log.text}</pre>
+            </details>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  ` : `<div class="text-center py-12 text-slate-400">该日期暂无交接记录</div>`;
+  document.getElementById('shiftLogContent').innerHTML = html;
+}
+
 // ==================== 页面1：箱体总览 ====================
 function renderOverview() {
   // 交接班提示条
@@ -160,7 +307,7 @@ function renderOverview() {
     `;
   }).join('');
 
-  // ======== 交接班摘要 ========
+  // 交接班摘要（真实统计）
   const s = getShiftSummary();
   const metrics = [
     { label: '今日新增逾期', value: s.newlyOverdue, color: COLOR_MAP.red,     hint: '只' },
@@ -180,6 +327,9 @@ function renderOverview() {
     </div>
   `).join('');
   document.getElementById('shiftText').textContent = buildShiftText();
+
+  // 逾期升级提醒
+  renderEscalation();
 
   // 状态分布条
   const bars = document.getElementById('statusBars');
@@ -264,23 +414,7 @@ function renderOverview() {
 }
 
 function copyShiftText() {
-  const text = buildShiftText();
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(() => showToast('交接文字已复制到剪贴板')).catch(() => fallbackCopy(text));
-  } else {
-    fallbackCopy(text);
-  }
-}
-function fallbackCopy(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.select();
-  try { document.execCommand('copy'); showToast('交接文字已复制到剪贴板'); }
-  catch(e) { showToast('复制失败，请手动复制', 'error'); }
-  document.body.removeChild(ta);
+  copyToClipboard(buildShiftText(), '交接文字已复制');
 }
 
 function filterByStatus(status) {
@@ -292,9 +426,11 @@ function initFilterOptions() {
   const carrierSel = document.getElementById('f-carrier');
   const ownerSel = document.getElementById('f-owner');
   const destSel = document.getElementById('f-dest');
-  CARRIERS.forEach(c => carrierSel.insertAdjacentHTML('beforeend', `<option value="${c}">${c}</option>`));
-  OWNERS.forEach(o => ownerSel.insertAdjacentHTML('beforeend', `<option value="${o}">${o}</option>`));
-  DESTS.forEach(d => destSel.insertAdjacentHTML('beforeend', `<option value="${d}">${d}</option>`));
+  if (carrierSel.options.length <= 1) {
+    CARRIERS.forEach(c => carrierSel.insertAdjacentHTML('beforeend', `<option value="${c}">${c}</option>`));
+    OWNERS.forEach(o => ownerSel.insertAdjacentHTML('beforeend', `<option value="${o}">${o}</option>`));
+    DESTS.forEach(d => destSel.insertAdjacentHTML('beforeend', `<option value="${d}">${d}</option>`));
+  }
 }
 initFilterOptions();
 
@@ -415,7 +551,6 @@ function renderOverdueStatusTabs() {
   const all = getOverdueBoxes();
   const counts = { all: all.length };
   Object.keys(FOLLOW_STATUS).forEach(k => counts[k] = all.filter(b => b.followStatus === k).length);
-
   const tabs = [
     { key: 'all',       label: '全部',       color: COLOR_MAP.slate },
     { key: 'pending',   label: '待联系',     color: FOLLOW_COLOR.pending },
@@ -440,14 +575,39 @@ function setStatusFilter(k) {
   renderOverdue();
 }
 
+// 跟进状态快速切换（单独保存，不强制备注）
+function setFollowStatusDirect(boxId, status) {
+  setBoxFollowStatusOnly(boxId, status);
+  showToast(`状态已更新为【${FOLLOW_STATUS[status].label}】`);
+  renderOverdue();
+  renderOverview();
+  renderEscalation();
+}
+
 function renderOverdueCard(b) {
   const severity = b.overdueDays >= 7 ? 'red' : b.overdueDays >= 3 ? 'amber' : 'blue';
   const sevColor = COLOR_MAP[severity];
   const fs = FOLLOW_STATUS[b.followStatus] || FOLLOW_STATUS.pending;
   const fc = FOLLOW_COLOR[b.followStatus] || FOLLOW_COLOR.pending;
   const lastRemark = b.remarks && b.remarks.length ? b.remarks[b.remarks.length - 1] : null;
+  const isEscalated = b.overdueDays >= 7 || b.followStatus === 'lost';
+
+  // 快速状态切换按钮
+  const statusBtns = Object.entries(FOLLOW_STATUS).map(([k, v]) => {
+    const active = b.followStatus === k;
+    const c = FOLLOW_COLOR[k];
+    return `
+      <button onclick="setFollowStatusDirect('${b.id}', '${k}')"
+        class="px-2 py-1 rounded-md text-xs font-medium transition-colors
+          ${active ? `${c.fill} text-white shadow-sm` : `${c.bg} ${c.text} border ${c.border} hover:opacity-80`}"
+        title="设置为${v.label}">
+        ${v.label}
+      </button>
+    `;
+  }).join('');
+
   return `
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 hover:shadow-md transition-shadow">
+    <div class="bg-white rounded-xl shadow-sm border ${isEscalated ? 'border-red-200' : 'border-slate-200'} p-5 hover:shadow-md transition-shadow">
       <div class="flex items-start gap-4">
         <div class="w-14 h-14 rounded-xl ${sevColor.bg} ${sevColor.text} border ${sevColor.border} flex flex-col items-center justify-center shrink-0">
           <div class="text-2xl font-bold">${b.overdueDays}</div>
@@ -460,7 +620,7 @@ function renderOverdueCard(b) {
             <span class="px-2 py-0.5 rounded-full text-xs font-medium ${fc.bg} ${fc.text} border ${fc.border}">
               <span class="inline-block status-dot ${fc.fill} mr-1"></span>${fs.label}
             </span>
-            ${b.overdueDays >= 7 ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">高风险</span>' : ''}
+            ${isEscalated ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">高风险</span>' : ''}
           </div>
           <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-sm">
             <div><span class="text-slate-400">货主：</span><span class="text-slate-700 font-medium">${b.owner}</span></div>
@@ -471,6 +631,11 @@ function renderOverdueCard(b) {
             <div><span class="text-slate-400">联系电话：</span><span class="text-slate-700 font-mono">${b.responsible.phone}</span></div>
             <div><span class="text-slate-400">承运商：</span><span class="text-slate-700">${b.carrier}</span></div>
             <div><span class="text-slate-400">车牌：</span><span class="text-slate-700">${b.plate}</span></div>
+          </div>
+          <!-- 快速状态切换 -->
+          <div class="mt-3 flex items-center gap-1.5 flex-wrap">
+            <span class="text-xs text-slate-500 mr-1">更新状态：</span>
+            ${statusBtns}
           </div>
           ${lastRemark ? `
             <div class="mt-3 p-2.5 rounded-lg bg-slate-50 border border-slate-100">
@@ -506,6 +671,7 @@ function renderOverdueCard(b) {
 function renderOverdue() {
   document.getElementById('overdueCount').textContent = getOverdueBoxes().length;
   renderOverdueStatusTabs();
+  renderEscalation();
 
   let list = [...getOverdueBoxes()];
   if (currentStatusFilter !== 'all') {
@@ -524,7 +690,6 @@ function renderOverdue() {
   }
 
   if (currentViewGroup === 'group') {
-    // 按 followStatus 分组
     const groups = {};
     list.forEach(b => {
       const k = b.followStatus || 'pending';
@@ -566,16 +731,15 @@ function openDrawer(boxId) {
   const c = COLOR_MAP[def.color];
   document.getElementById('drawerTitle').textContent = `${b.id} · 详情`;
 
-  // 构建流转时间线
-  const timeline = buildTimeline(b);
+  // 使用 box.timeline 固化时间线
+  const timeline = b.timeline || [];
   const timelineHTML = timeline.length ? `
     <div class="relative pl-6">
       <div class="absolute left-[7px] top-1 bottom-1 w-0.5 bg-slate-200"></div>
       ${timeline.map((e, i) => {
         const style = TIMELINE_STYLE[e.type] || TIMELINE_STYLE.remark;
-        const isLast = i === timeline.length - 1;
         return `
-          <div class="relative pb-4 ${isLast ? '' : ''}">
+          <div class="relative pb-4">
             <div class="absolute -left-6 w-4 h-4 rounded-full ${style.c.fill} border-2 border-white shadow flex items-center justify-center text-white">
               ${ICONS[e.type] || ICONS.remark}
             </div>
@@ -706,40 +870,35 @@ function saveRemark() {
   const conclusion = document.querySelector('input[name="conclusion"]:checked');
   const text = document.getElementById('remarkText').value.trim();
   const followStatus = document.getElementById('remarkStatus').value;
-  if (!conclusion && !text) {
-    showToast('请选择处置结论或填写备注', 'info');
-    return;
-  }
+
+  // 规则：可以只改状态，也可以只写备注；状态永远以用户手动选的为准
+  // 但如果用户选了处置结论，会建议更新到对应状态（但不强制，手动选择优先）
   const b = BOXES.find(x => x.id === currentOverdueBoxId);
   if (!b) return;
 
-  const remarks = [...(b.remarks || [])];
-  remarks.push({
-    conclusion: conclusion ? conclusion.value : '未填写',
-    text,
-    time: new Date(),
-    op: '张磊',
-  });
-
-  // 结论 → 跟进状态自动联动（用户手动选择优先）
-  let finalStatus = followStatus;
-  if (!conclusion) {
-    // 保持用户手动选择
-  } else if (conclusion.value === '已安排返程') {
-    finalStatus = 'returning';
-  } else if (conclusion.value === '疑似丢失') {
-    finalStatus = 'lost';
-  } else if (conclusion.value === '客户仍在使用') {
-    finalStatus = 'contacted';
+  // 构造新 remarks（只有当用户选了结论或写了备注时才追加）
+  let remarks = b.remarks || [];
+  if (conclusion || text) {
+    remarks = [...remarks, {
+      conclusion: conclusion ? conclusion.value : '未填写',
+      text,
+      time: new Date(),
+      op: '张磊',
+    }];
   }
 
-  // 持久化：remarks + followStatus
-  setBoxPersist(b.id, { remarks, followStatus: finalStatus });
+  // 持久化
+  setBoxPersist(b.id, { remarks, followStatus });
 
-  showToast('催还记录已保存（本地持久化）');
+  const msg = [];
+  if (conclusion || text) msg.push('催还记录已保存');
+  msg.push(`状态更新为【${FOLLOW_STATUS[followStatus].label}】`);
+  showToast(msg.join('，'));
+
   closeRemarkModal();
   renderOverdue();
   renderOverview();
+  renderEscalation();
 }
 
 // ==================== 初始化 ====================

@@ -81,6 +81,7 @@ function genBox(id, status, extra = {}) {
     overdueDays: extra.overdueDays || 0,
     followStatus: extra.followStatus || 'pending',
     timeline: null, // 固化时间线，首次生成后不变，新增记录追加
+    statusHistory: extra.statusHistory || [], // 状态变更责任链
   };
 }
 
@@ -262,6 +263,7 @@ function getOverdueBoxes() { return BOXES.filter(b => b.status === 'occupied' &&
 // ====== 本地持久化 ======
 const LS_KEY = 'cold_box_persist_v1';
 const LS_SHIFT_KEY = 'cold_box_shift_logs_v1';
+const LS_TODO_KEY = 'cold_box_todo_v1';
 
 function loadPersist() {
   try {
@@ -278,6 +280,7 @@ function getPersistMap() {
     if (persist[b.id]) {
       if (persist[b.id].remarks) b.remarks = persist[b.id].remarks.map(r => ({...r, time: new Date(r.time)}));
       if (persist[b.id].followStatus) b.followStatus = persist[b.id].followStatus;
+      if (persist[b.id].statusHistory) b.statusHistory = persist[b.id].statusHistory.map(h => ({...h, time: new Date(h.time)}));
       // 重新构建时间线（合并新 remarks）
       b.timeline = buildTimeline(b);
     }
@@ -288,6 +291,7 @@ function setBoxPersist(boxId, patch) {
   const cur = persist[boxId] || {};
   if (patch.remarks !== undefined) cur.remarks = patch.remarks.map(r => ({...r, time: r.time instanceof Date ? r.time.toISOString() : r.time}));
   if (patch.followStatus !== undefined) cur.followStatus = patch.followStatus;
+  if (patch.statusHistory !== undefined) cur.statusHistory = patch.statusHistory.map(h => ({...h, time: h.time instanceof Date ? h.time.toISOString() : h.time}));
   persist[boxId] = cur;
   savePersist(persist);
   // 同步内存 + 重建时间线
@@ -295,35 +299,104 @@ function setBoxPersist(boxId, patch) {
   if (b) {
     if (patch.remarks !== undefined) b.remarks = patch.remarks;
     if (patch.followStatus !== undefined) b.followStatus = patch.followStatus;
+    if (patch.statusHistory !== undefined) b.statusHistory = patch.statusHistory;
     b.timeline = buildTimeline(b);
   }
 }
-function setBoxFollowStatusOnly(boxId, status) {
-  setBoxPersist(boxId, { followStatus: status });
+function setBoxFollowStatusOnly(boxId, status, operator = '张磊') {
+  const b = BOXES.find(x => x.id === boxId);
+  if (!b) return;
+  const prevStatus = b.followStatus;
+  if (prevStatus === status) return;
+  const history = b.statusHistory || [];
+  history.push({
+    from: prevStatus,
+    to: status,
+    time: new Date(),
+    op: operator,
+  });
+  setBoxPersist(boxId, { followStatus: status, statusHistory: history });
+}
+// ====== 交接待办清单 ======
+function loadTodoList() {
+  try {
+    const raw = localStorage.getItem(LS_TODO_KEY);
+    const list = raw ? (JSON.parse(raw) || []) : [];
+    return list.map(t => ({...t, createdAt: new Date(t.createdAt)}));
+  } catch(e) { return []; }
+}
+function saveTodoList(list) {
+  try { localStorage.setItem(LS_TODO_KEY, JSON.stringify(list)); } catch(e) {}
+}
+function toggleTodo(boxId, operator = '张磊', note = '') {
+  const list = loadTodoList();
+  const idx = list.findIndex(t => t.boxId === boxId);
+  if (idx >= 0) {
+    list.splice(idx, 1);
+  } else {
+    list.push({ boxId, operator, note, createdAt: new Date(), done: false });
+  }
+  saveTodoList(list);
+  return list;
+}
+function getTodoList() {
+  return loadTodoList().filter(t => !t.done);
+}
+function markTodoDone(boxId) {
+  const list = loadTodoList();
+  list.forEach(t => { if (t.boxId === boxId) t.done = true; });
+  saveTodoList(list);
+  return list;
 }
 function clearAllPersist() {
   localStorage.removeItem(LS_KEY);
   localStorage.removeItem(LS_SHIFT_KEY);
+  localStorage.removeItem(LS_TODO_KEY);
 }
 
 // ====== 交接记录簿 ======
-function saveShiftLog(operator = '张磊', confirmed = false) {
+// type: 'copy' | 'confirm'  区分复制留痕和正式确认
+function saveShiftLog(operator = '张磊', type = 'confirm', shiftNote = '') {
   const logs = getShiftLogs();
   const now = new Date();
   const pad = x => String(x).padStart(2, '0');
   const shift = now.getHours() >= 8 && now.getHours() < 20 ? '早班' : '晚班';
+  const confirmed = type === 'confirm';
+
+  // 交接快照：保存当时完整的高风险箱体、逾期分组、升级话术
+  const riskBoxes = BOXES.filter(b => b.risk).map(b => ({
+    id: b.id, status: b.status, overdueDays: b.overdueDays || 0,
+    followStatus: b.followStatus, owner: b.owner, responsible: b.responsible.name,
+  }));
+  const overdue = getOverdueBoxes();
+  const overdueByStatus = {};
+  Object.keys(FOLLOW_STATUS).forEach(k => {
+    overdueByStatus[k] = overdue.filter(b => b.followStatus === k).map(b => ({
+      id: b.id, overdueDays: b.overdueDays, owner: b.owner, responsible: b.responsible.name,
+    }));
+  });
+  const todoSnapshot = getTodoList().map(t => ({...t, createdAt: t.createdAt.toISOString()}));
+
   const entry = {
     id: now.getTime(),
     date: formatD(now),
     shift,
     time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
     operator,
+    type,        // 'copy' or 'confirm'
     confirmed,
+    shiftNote,   // 当班备注
     summary: getShiftSummary(),
     text: buildShiftText(),
+    escalationSpeech: generateEscalationSpeech(),
+    snapshot: {
+      riskBoxes,
+      overdueByStatus,
+      todoList: todoSnapshot,
+    },
   };
   logs.unshift(entry);
-  try { localStorage.setItem(LS_SHIFT_KEY, JSON.stringify(logs.slice(0, 60))); } catch(e) {}
+  try { localStorage.setItem(LS_SHIFT_KEY, JSON.stringify(logs.slice(0, 100))); } catch(e) {}
   return entry;
 }
 function getShiftLogs() {
@@ -438,6 +511,57 @@ function buildShiftText() {
   ].join('\n');
 }
 
+// ====== 班组交接包导出 ======
+function buildHandoverPackage() {
+  const s = getShiftSummary();
+  const now = new Date();
+  const pad = x => String(x).padStart(2, '0');
+  const shift = now.getHours() >= 8 && now.getHours() < 20 ? '早班' : '晚班';
+
+  const lines = [];
+  lines.push(`╔══════════════════════════════════════════════════════════════╗`);
+  lines.push(`║         低温箱周转 · 班组交接包    ${formatD(now)} ${shift}          ║`);
+  lines.push(`╚══════════════════════════════════════════════════════════════╝`);
+  lines.push('');
+  lines.push(`【一、交接班摘要】`);
+  lines.push(`  箱体状态：在库 ${getStatusCount('in_stock')} / 在途 ${getStatusCount('in_transit')} / 客户占用 ${getStatusCount('occupied')} / 待清洗 ${getStatusCount('cleaning')} / 待维修 ${getStatusCount('repair')}`);
+  lines.push(`  逾期合计：${s.overdueTotal} 只（待联系 ${s.pendingTotal}，已联系 ${s.contactedTotal}，待返程 ${s.returningTotal}，丢失 ${s.lostTotal}）`);
+  lines.push(`  今日推进：新增逾期 ${s.newlyOverdue} / 已催还 ${s.calledToday} / 已安排返程 ${s.returningToday} / 疑似丢失 ${s.lostToday}`);
+  lines.push('');
+  lines.push(`【二、逾期升级提醒】`);
+  const escalated = getEscalatedBoxes();
+  if (escalated.length) {
+    escalated.forEach(b => {
+      const tag = b.followStatus === 'lost' ? '⚠️ 疑似丢失' : `逾期${b.overdueDays}天`;
+      lines.push(`  • ${b.id} [${tag}] ${b.owner} ${b.dest}，责任人 ${b.responsible.name}（${b.responsible.phone}）`);
+    });
+  } else {
+    lines.push('  （暂无需升级跟进的箱体）');
+  }
+  lines.push('');
+  lines.push(`【三、下一班待办清单】`);
+  const todos = getTodoList();
+  if (todos.length) {
+    todos.forEach(t => {
+      const b = BOXES.find(x => x.id === t.boxId);
+      if (b) lines.push(`  • ${t.boxId} ${b.owner} · ${b.responsible.name}（${t.note || '重点跟进'}，标记人：${t.operator}）`);
+    });
+  } else {
+    lines.push('  （暂无待办）');
+  }
+  lines.push('');
+  lines.push(`【四、逾期箱体明细】`);
+  const overdue = getOverdueBoxes();
+  overdue.sort((a,b) => b.overdueDays - a.overdueDays);
+  overdue.forEach(b => {
+    const fs = FOLLOW_STATUS[b.followStatus] || FOLLOW_STATUS.pending;
+    lines.push(`  • ${b.id} 逾期${b.overdueDays}天 [${fs.label}] ${b.owner} ${b.dest} · ${b.responsible.name} ${b.responsible.phone}`);
+  });
+  lines.push('');
+  lines.push(`—— 交接包生成时间：${formatDT(now)} ——`);
+  return lines.join('\n');
+}
+
 window.MOCK = {
   BOXES, FLOW_LOGS, STATUS_DEF, CARRIERS, OWNERS, DESTS, PLATES, RESPONSIBLES,
   FOLLOW_STATUS,
@@ -447,5 +571,7 @@ window.MOCK = {
   getShiftSummary, buildShiftText,
   saveShiftLog, getShiftLogs, getShiftLogDates, getShiftLogsByDate,
   getEscalatedBoxes, generateEscalationSpeech,
+  loadTodoList, saveTodoList, toggleTodo, getTodoList, markTodoDone,
+  buildHandoverPackage,
 };
 })();

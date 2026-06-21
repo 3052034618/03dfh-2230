@@ -6,7 +6,9 @@ const { BOXES, FLOW_LOGS, STATUS_DEF, CARRIERS, OWNERS, DESTS, PLATES, RESPONSIB
   buildTimeline, setBoxPersist, setBoxFollowStatusOnly, clearAllPersist,
   getShiftSummary, buildShiftText,
   saveShiftLog, getShiftLogs, getShiftLogDates, getShiftLogsByDate,
-  getEscalatedBoxes, generateEscalationSpeech } = window.MOCK;
+  getEscalatedBoxes, generateEscalationSpeech,
+  loadTodoList, saveTodoList, toggleTodo, getTodoList, markTodoDone,
+  buildHandoverPackage } = window.MOCK;
 
 const COLOR_MAP = {
   emerald: { bg: 'bg-emerald-50',  border: 'border-emerald-200',   text: 'text-emerald-700',  num: 'text-emerald-600', ring: 'ring-emerald-500', fill: 'bg-emerald-500', light: 'bg-emerald-100' },
@@ -171,16 +173,19 @@ function copyEscalationSpeech() {
 
 // ==================== 交接班确认 & 记录簿 ====================
 function confirmShift() {
-  const entry = saveShiftLog('张磊', true);
+  const note = prompt('请输入当班备注（选填）：', '') || '';
+  const entry = saveShiftLog('张磊', 'confirm', note);
   showToast(`${entry.shift}已确认交接，记录已保存`);
   renderOverview();
 }
 
 let currentShiftLogDate = null;
+let currentShiftDetailLog = null;
 
 function openShiftLogModal() {
   document.getElementById('shiftLogModal').classList.remove('hidden');
   document.getElementById('shiftLogModal').classList.add('flex');
+  closeShiftLogDetail();
   const dates = getShiftLogDates();
   if (!dates.length) {
     document.getElementById('shiftLogDates').innerHTML = '<span class="text-sm text-slate-400">暂无交接记录</span>';
@@ -188,16 +193,14 @@ function openShiftLogModal() {
       <div class="text-center py-16 text-slate-400">
         <div class="text-5xl mb-3">📋</div>
         <div class="font-medium">暂无交接记录</div>
-        <div class="text-sm mt-1">点击"确认交接"后，记录会保存在这里</div>
+        <div class="text-sm mt-1">点击"确认交接"或"一键复制"后，记录会保存在这里</div>
       </div>
     `;
     return;
   }
-  // 默认选最新日期
   if (!currentShiftLogDate || !dates.includes(currentShiftLogDate)) {
     currentShiftLogDate = dates[0];
   }
-  // 日期 Tab
   document.getElementById('shiftLogDates').innerHTML = dates.map(d => {
     const active = d === currentShiftLogDate;
     return `
@@ -213,6 +216,7 @@ function openShiftLogModal() {
 function closeShiftLogModal() {
   document.getElementById('shiftLogModal').classList.add('hidden');
   document.getElementById('shiftLogModal').classList.remove('flex');
+  closeShiftLogDetail();
 }
 function setShiftLogDate(d) {
   currentShiftLogDate = d;
@@ -224,33 +228,159 @@ function renderShiftLogContent() {
     <div class="space-y-4">
       ${logs.map(log => {
         const s = log.summary || {};
+        const isCopy = log.type === 'copy';
+        const badge = log.confirmed
+          ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500 text-white">✓ 已确认交接</span>'
+          : '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-slate-500 text-white">📋 复制留痕</span>';
         return `
-          <div class="p-4 rounded-xl border ${log.confirmed ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}">
+          <div class="p-4 rounded-xl border ${log.confirmed ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'} cursor-pointer hover:shadow-md transition-shadow" onclick="openShiftLogDetail(${log.id})">
             <div class="flex items-center justify-between mb-3">
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-2 flex-wrap">
                 <span class="px-2.5 py-1 rounded-full text-xs font-bold ${log.shift === '早班' ? 'bg-amber-100 text-amber-700' : 'bg-indigo-100 text-indigo-700'}">${log.shift}</span>
                 <span class="text-sm text-slate-700 font-medium">${log.time}</span>
                 <span class="text-xs text-slate-500">· 操作人 ${log.operator}</span>
-                ${log.confirmed ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500 text-white">✓ 已确认</span>' : ''}
+                ${badge}
+                ${log.shiftNote ? '<span class="px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700">📝 有备注</span>' : ''}
               </div>
-              <button onclick='copyToClipboard(\`${log.text.replace(/`/g, '\\`')}\`, "交接文案已复制")' class="text-xs text-cold-600 hover:underline">复制文案</button>
+              <div class="flex items-center gap-2" onclick="event.stopPropagation()">
+                <button onclick='copyToClipboard(\`${log.text.replace(/`/g, '\\`')}\`, "交接文案已复制")' class="text-xs text-cold-600 hover:underline">复制文案</button>
+                ${ICONS.chevron}
+              </div>
             </div>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm mb-3">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
               <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">新增逾期</span><div class="font-bold text-red-600">${s.newlyOverdue || 0} 只</div></div>
               <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">已催还</span><div class="font-bold text-blue-600">${s.calledToday || 0} 只</div></div>
               <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">已安排返程</span><div class="font-bold text-emerald-600">${s.returningToday || 0} 只</div></div>
               <div class="p-2 rounded-lg bg-white border border-slate-100"><span class="text-slate-400 text-xs">疑似丢失</span><div class="font-bold text-rose-600">${s.lostToday || 0} 只</div></div>
             </div>
-            <details class="text-xs text-slate-600">
-              <summary class="cursor-pointer text-cold-600 hover:underline select-none">查看完整交接文案</summary>
-              <pre class="mt-2 p-3 bg-white rounded-lg border border-slate-100 text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">${log.text}</pre>
-            </details>
           </div>
         `;
       }).join('')}
     </div>
   ` : `<div class="text-center py-12 text-slate-400">该日期暂无交接记录</div>`;
   document.getElementById('shiftLogContent').innerHTML = html;
+}
+
+// 交接详情
+function openShiftLogDetail(logId) {
+  const logs = getShiftLogs();
+  const log = logs.find(l => l.id === logId);
+  if (!log) return;
+  currentShiftDetailLog = log;
+  const snap = log.snapshot || {};
+  const riskBoxes = snap.riskBoxes || [];
+  const overdueByStatus = snap.overdueByStatus || {};
+  const todoList = snap.todoList || [];
+  const s = log.summary || {};
+
+  const statusSection = Object.keys(FOLLOW_STATUS).map(k => {
+    const list = overdueByStatus[k] || [];
+    if (!list.length) return '';
+    const fs = FOLLOW_STATUS[k];
+    const fc = FOLLOW_COLOR[k];
+    return `
+      <div class="mb-3">
+        <div class="flex items-center gap-1.5 mb-1.5">
+          <span class="w-2 h-2 rounded-full ${fc.fill}"></span>
+          <span class="text-sm font-medium text-slate-700">${fs.label}</span>
+          <span class="text-xs text-slate-400">${list.length} 只</span>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-1.5">
+          ${list.map(b => `<div class="text-xs px-2 py-1 rounded bg-slate-50 text-slate-600">${b.id} · ${b.owner}</div>`).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('shiftLogDetail').innerHTML = `
+    <div class="space-y-5">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="px-2.5 py-1 rounded-full text-xs font-bold ${log.shift === '早班' ? 'bg-amber-100 text-amber-700' : 'bg-indigo-100 text-indigo-700'}">${log.shift}</span>
+          <span class="text-sm text-slate-700 font-medium">${log.date} ${log.time}</span>
+          <span class="text-xs text-slate-500">· 操作人 ${log.operator}</span>
+          ${log.confirmed ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500 text-white">✓ 已确认</span>' : '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-slate-500 text-white">📋 复制留痕</span>'}
+        </div>
+        <button onclick='copyToClipboard(\`${log.text.replace(/`/g, '\\`')}\`, "交接文案已复制")' class="text-xs text-cold-600 hover:underline">复制文案</button>
+      </div>
+
+      ${log.shiftNote ? `
+        <div class="p-3 rounded-lg bg-amber-50 border border-amber-200">
+          <div class="text-xs font-medium text-amber-700 mb-1">📝 当班备注</div>
+          <div class="text-sm text-amber-800">${log.shiftNote}</div>
+        </div>
+      ` : ''}
+
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">一、4 项指标</h4>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+          <div class="p-2.5 rounded-lg bg-red-50 border border-red-100"><span class="text-slate-400 text-xs">新增逾期</span><div class="font-bold text-red-600 text-lg">${s.newlyOverdue || 0}</div></div>
+          <div class="p-2.5 rounded-lg bg-blue-50 border border-blue-100"><span class="text-slate-400 text-xs">已催还</span><div class="font-bold text-blue-600 text-lg">${s.calledToday || 0}</div></div>
+          <div class="p-2.5 rounded-lg bg-emerald-50 border border-emerald-100"><span class="text-slate-400 text-xs">已安排返程</span><div class="font-bold text-emerald-600 text-lg">${s.returningToday || 0}</div></div>
+          <div class="p-2.5 rounded-lg bg-rose-50 border border-rose-100"><span class="text-slate-400 text-xs">疑似丢失</span><div class="font-bold text-rose-600 text-lg">${s.lostToday || 0}</div></div>
+        </div>
+      </div>
+
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">二、高风险箱体（${riskBoxes.length} 只）</h4>
+        ${riskBoxes.length ? `
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+            ${riskBoxes.map(b => {
+              const def = STATUS_DEF[b.status] || STATUS_DEF.occupied;
+              const c = COLOR_MAP[def.color];
+              return `
+                <div class="p-2.5 rounded-lg bg-red-50 border border-red-100 flex items-center justify-between">
+                  <div>
+                    <span class="font-semibold text-slate-800 text-sm">${b.id}</span>
+                    <span class="text-xs px-1.5 py-0.5 rounded ${c.bg} ${c.text} ml-1">${def.label}</span>
+                    ${b.overdueDays ? `<span class="text-xs text-red-600 ml-1">逾期${b.overdueDays}天</span>` : ''}
+                  </div>
+                  <span class="text-xs text-slate-500">${b.owner} · ${b.responsible}</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        ` : '<div class="text-sm text-slate-400 p-3 bg-slate-50 rounded-lg text-center">当时无高风险箱体 ✅</div>'}
+      </div>
+
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">三、逾期分组</h4>
+        ${statusSection || '<div class="text-sm text-slate-400 p-3 bg-slate-50 rounded-lg text-center">当时无逾期箱体</div>'}
+      </div>
+
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">四、下一班待办（${todoList.length} 项）</h4>
+        ${todoList.length ? `
+          <div class="space-y-1.5">
+            ${todoList.map(t => `
+              <div class="p-2.5 rounded-lg bg-cold-50 border border-cold-100 flex items-center justify-between">
+                <div>
+                  <span class="font-semibold text-slate-800 text-sm">${t.boxId}</span>
+                  <span class="text-xs text-slate-500 ml-2">${t.note || '重点跟进'}</span>
+                </div>
+                <span class="text-xs text-slate-400">标记人：${t.operator}</span>
+              </div>
+            `).join('')}
+          </div>
+        ` : '<div class="text-sm text-slate-400 p-3 bg-slate-50 rounded-lg text-center">当时无待办</div>'}
+      </div>
+
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">五、主管升级话术</h4>
+        <pre class="p-3 bg-slate-50 rounded-lg border border-slate-100 text-xs text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">${log.escalationSpeech || '（无升级内容）'}</pre>
+      </div>
+
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">六、完整交接文案</h4>
+        <pre class="p-3 bg-slate-50 rounded-lg border border-slate-100 text-xs text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">${log.text}</pre>
+      </div>
+    </div>
+  `;
+  document.getElementById('shiftLogDetailPanel').classList.remove('hidden');
+}
+function closeShiftLogDetail() {
+  document.getElementById('shiftLogDetailPanel').classList.add('hidden');
+  currentShiftDetailLog = null;
 }
 
 // ==================== 页面1：箱体总览 ====================
@@ -330,6 +460,10 @@ function renderOverview() {
 
   // 逾期升级提醒
   renderEscalation();
+
+  // 下一班待办清单
+  renderTodoList('todoList');
+  renderTodoList('todoListOverdue', true);
 
   // 状态分布条
   const bars = document.getElementById('statusBars');
@@ -414,7 +548,9 @@ function renderOverview() {
 }
 
 function copyShiftText() {
-  copyToClipboard(buildShiftText(), '交接文字已复制');
+  const text = buildShiftText();
+  copyToClipboard(text, '交接文字已复制（已留痕）');
+  saveShiftLog('张磊', 'copy', '');
 }
 
 function filterByStatus(status) {
@@ -577,11 +713,79 @@ function setStatusFilter(k) {
 
 // 跟进状态快速切换（单独保存，不强制备注）
 function setFollowStatusDirect(boxId, status) {
-  setBoxFollowStatusOnly(boxId, status);
+  setBoxFollowStatusOnly(boxId, status, '张磊');
   showToast(`状态已更新为【${FOLLOW_STATUS[status].label}】`);
   renderOverdue();
   renderOverview();
   renderEscalation();
+}
+
+// 交接待办：标记/取消下一班重点跟进
+function toggleNextShiftTodo(boxId) {
+  const todos = toggleTodo(boxId, '张磊', '');
+  const inTodo = todos.some(t => t.boxId === boxId && !t.done);
+  showToast(inTodo ? '已加入下一班待办' : '已从下一班待办移除');
+  renderOverview();
+  renderOverdue();
+}
+
+// 渲染交接待办清单（总览和逾期页共用）
+function renderTodoList(containerId, compact = false) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const todos = getTodoList();
+  const countEl = document.getElementById(containerId + 'Count');
+  if (countEl) countEl.textContent = todos.length;
+
+  if (!todos.length) {
+    el.innerHTML = `<div class="${compact ? 'py-3' : 'py-6'} text-center text-sm text-slate-400">暂无待办，交班轻松 ✨</div>`;
+    return;
+  }
+  el.innerHTML = todos.map(t => {
+    const b = BOXES.find(x => x.id === t.boxId);
+    if (!b) return '';
+    const def = STATUS_DEF[b.status] || STATUS_DEF.occupied;
+    const c = COLOR_MAP[def.color];
+    return `
+      <div class="p-2.5 rounded-lg ${compact ? 'bg-white' : 'bg-cold-50'} border ${compact ? 'border-slate-100' : 'border-cold-100'} flex items-start gap-2.5">
+        <div class="w-7 h-7 rounded-md ${c.bg} ${c.text} flex items-center justify-center shrink-0 mt-0.5">${ICONS[def.icon]}</div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-slate-800 text-sm cursor-pointer hover:text-cold-600" onclick="openDrawer('${b.id}')">${b.id}</span>
+            <span class="text-xs px-1.5 py-0.5 rounded ${c.bg} ${c.text}">${def.label}</span>
+            ${b.overdueDays ? `<span class="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">逾期${b.overdueDays}天</span>` : ''}
+          </div>
+          <div class="text-xs text-slate-500 mt-0.5 truncate">${b.owner} · ${b.responsible.name}（${b.responsible.phone}）</div>
+          ${t.note ? `<div class="text-xs text-cold-700 mt-0.5">📝 ${t.note}</div>` : ''}
+          <div class="text-[11px] text-slate-400 mt-0.5">标记人：${t.operator} · ${formatDT(t.createdAt)}</div>
+        </div>
+        <button onclick="toggleNextShiftTodo('${b.id}')" class="text-xs text-slate-400 hover:text-red-600 shrink-0" title="移除待办">移除</button>
+      </div>
+    `;
+  }).join('');
+}
+
+// 班组交接包：复制 + 下载
+function copyHandoverPackage() {
+  const pkg = buildHandoverPackage();
+  copyToClipboard(pkg, '交接包已复制');
+}
+function downloadHandoverPackage() {
+  const pkg = buildHandoverPackage();
+  const now = new Date();
+  const pad = x => String(x).padStart(2, '0');
+  const shift = now.getHours() >= 8 && now.getHours() < 20 ? '早班' : '晚班';
+  const filename = `低温箱班组交接包_${formatD(now)}_${shift}.txt`;
+  const blob = new Blob([pkg], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast('交接包已下载');
 }
 
 function renderOverdueCard(b) {
@@ -591,6 +795,7 @@ function renderOverdueCard(b) {
   const fc = FOLLOW_COLOR[b.followStatus] || FOLLOW_COLOR.pending;
   const lastRemark = b.remarks && b.remarks.length ? b.remarks[b.remarks.length - 1] : null;
   const isEscalated = b.overdueDays >= 7 || b.followStatus === 'lost';
+  const inTodo = getTodoList().some(t => t.boxId === b.id);
 
   // 快速状态切换按钮
   const statusBtns = Object.entries(FOLLOW_STATUS).map(([k, v]) => {
@@ -607,7 +812,7 @@ function renderOverdueCard(b) {
   }).join('');
 
   return `
-    <div class="bg-white rounded-xl shadow-sm border ${isEscalated ? 'border-red-200' : 'border-slate-200'} p-5 hover:shadow-md transition-shadow">
+    <div class="bg-white rounded-xl shadow-sm border ${isEscalated ? 'border-red-200' : 'border-slate-200'} p-5 hover:shadow-md transition-shadow ${inTodo ? 'ring-2 ring-cold-400' : ''}">
       <div class="flex items-start gap-4">
         <div class="w-14 h-14 rounded-xl ${sevColor.bg} ${sevColor.text} border ${sevColor.border} flex flex-col items-center justify-center shrink-0">
           <div class="text-2xl font-bold">${b.overdueDays}</div>
@@ -621,6 +826,7 @@ function renderOverdueCard(b) {
               <span class="inline-block status-dot ${fc.fill} mr-1"></span>${fs.label}
             </span>
             ${isEscalated ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">高风险</span>' : ''}
+            ${inTodo ? '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-cold-500 text-white">📌 下一班待办</span>' : ''}
           </div>
           <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-sm">
             <div><span class="text-slate-400">货主：</span><span class="text-slate-700 font-medium">${b.owner}</span></div>
@@ -636,6 +842,11 @@ function renderOverdueCard(b) {
           <div class="mt-3 flex items-center gap-1.5 flex-wrap">
             <span class="text-xs text-slate-500 mr-1">更新状态：</span>
             ${statusBtns}
+            <button onclick="toggleNextShiftTodo('${b.id}')"
+              class="px-2 py-1 rounded-md text-xs font-medium transition-colors ${inTodo ? 'bg-cold-600 text-white' : 'bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200'}"
+              title="${inTodo ? '取消下一班待办' : '标记为下一班重点跟进'}">
+              ${inTodo ? '✓ 已标记待办' : '📌 交接下一班'}
+            </button>
           </div>
           ${lastRemark ? `
             <div class="mt-3 p-2.5 rounded-lg bg-slate-50 border border-slate-100">
@@ -764,6 +975,34 @@ function openDrawer(boxId) {
     </div>
   ` : '';
 
+  // 责任链：状态变更日志
+  const sh = (b.statusHistory || []).slice().reverse();
+  const chainHTML = sh.length ? `
+    <div class="relative pl-6">
+      <div class="absolute left-[7px] top-1 bottom-1 w-0.5 bg-slate-200"></div>
+      ${sh.map(h => {
+        const fromDef = FOLLOW_STATUS[h.from] || { label: h.from, color: 'slate' };
+        const toDef = FOLLOW_STATUS[h.to] || { label: h.to, color: 'slate' };
+        const fc = FOLLOW_COLOR[h.from] || COLOR_MAP.slate;
+        const tc = FOLLOW_COLOR[h.to] || COLOR_MAP.slate;
+        return `
+          <div class="relative pb-3">
+            <div class="absolute -left-6 w-4 h-4 rounded-full ${tc.fill} border-2 border-white shadow flex items-center justify-center text-[10px] font-bold text-white">↻</div>
+            <div class="bg-slate-50 rounded-lg border border-slate-100 p-2.5">
+              <div class="flex items-center gap-2 flex-wrap mb-1">
+                <span class="px-1.5 py-0.5 rounded text-[11px] font-medium ${fc.bg} ${fc.text}">${fromDef.label}</span>
+                <span class="text-slate-400 text-xs">→</span>
+                <span class="px-1.5 py-0.5 rounded text-[11px] font-medium ${tc.bg} ${tc.text}">${toDef.label}</span>
+                <span class="text-xs text-slate-400 ml-auto">${formatDT(h.time)}</span>
+              </div>
+              <div class="text-xs text-slate-500">操作人：${h.op}</div>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  ` : '<div class="text-sm text-slate-400 text-center py-6 bg-slate-50 rounded-lg">暂无状态变更记录</div>';
+
   const body = document.getElementById('drawerBody');
   body.innerHTML = `
     <div class="space-y-5">
@@ -843,6 +1082,11 @@ function openDrawer(boxId) {
         ${timelineHTML}
       </div>
 
+      <div>
+        <h4 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">状态变更责任链</h4>
+        ${chainHTML}
+      </div>
+
     </div>
   `;
   document.getElementById('drawer').classList.remove('hidden');
@@ -871,8 +1115,6 @@ function saveRemark() {
   const text = document.getElementById('remarkText').value.trim();
   const followStatus = document.getElementById('remarkStatus').value;
 
-  // 规则：可以只改状态，也可以只写备注；状态永远以用户手动选的为准
-  // 但如果用户选了处置结论，会建议更新到对应状态（但不强制，手动选择优先）
   const b = BOXES.find(x => x.id === currentOverdueBoxId);
   if (!b) return;
 
@@ -887,12 +1129,24 @@ function saveRemark() {
     }];
   }
 
+  // 状态变更（记录责任链）
+  let history = b.statusHistory || [];
+  if (b.followStatus !== followStatus) {
+    history.push({
+      from: b.followStatus,
+      to: followStatus,
+      time: new Date(),
+      op: '张磊',
+    });
+  }
+
   // 持久化
-  setBoxPersist(b.id, { remarks, followStatus });
+  setBoxPersist(b.id, { remarks, followStatus, statusHistory: history });
 
   const msg = [];
   if (conclusion || text) msg.push('催还记录已保存');
-  msg.push(`状态更新为【${FOLLOW_STATUS[followStatus].label}】`);
+  if (b.followStatus !== followStatus) msg.push(`状态更新为【${FOLLOW_STATUS[followStatus].label}】`);
+  else msg.push('已保存');
   showToast(msg.join('，'));
 
   closeRemarkModal();

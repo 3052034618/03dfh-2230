@@ -25,6 +25,9 @@ function diffDays(d1, d2 = new Date()) {
 function diffHours(d1, d2 = new Date()) {
   return Math.floor((d2 - d1) / 3600000);
 }
+function isSameDay(d1, d2 = new Date()) {
+  return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
+}
 
 const CARRIERS = ['顺冷物流', '冰链运输', '寒通快运', '极鲜冷链', '瑞雪物流'];
 const OWNERS = ['盒马鲜生', '永辉超市', '叮咚买菜', '每日优鲜', '大润发', '家乐福', '物美'];
@@ -41,10 +44,17 @@ const RESPONSIBLES = [
   {name: '吴秀兰', phone: '13208901234'},
 ];
 
+// 跟进状态定义（逾期处理用）
+const FOLLOW_STATUS = {
+  pending:   { label: '待联系', color: 'slate',  order: 1 },
+  contacted: { label: '已联系', color: 'blue',   order: 2 },
+  returning: { label: '待返程', color: 'emerald',order: 3 },
+  lost:      { label: '丢失',   color: 'red',    order: 4 },
+};
+
 // 箱体状态类型
-// in_stock 在库 / in_transit 在途 / occupied 客户占用 / cleaning 待清洗 / repair 待维修
 function genBox(id, status, extra = {}) {
-  const base = {
+  return {
     id: `COLD-${String(id).padStart(4, '0')}`,
     status,
     spec: extra.spec || '标准600L',
@@ -59,55 +69,147 @@ function genBox(id, status, extra = {}) {
     turnoverDays: extra.turnoverDays || 3,
     remarks: extra.remarks || [],
     risk: extra.risk || false,
+    overdueDays: extra.overdueDays || 0,
+    followStatus: extra.followStatus || 'pending',
+    timeline: extra.timeline || null,
   };
-  return base;
+}
+
+// 生成箱体流转时间线
+function buildTimeline(box) {
+  const events = [];
+  // 出库
+  if (box.outTime) {
+    events.push({
+      type: 'out',
+      label: '出库',
+      time: box.outTime,
+      desc: `${box.plate} 承运发往 ${box.dest}`,
+      op: RESPONSIBLES[Math.floor(Math.random()*RESPONSIBLES.length)].name,
+    });
+  }
+  // 签收（在途和占用箱一般都有签收）
+  if ((box.status === 'in_transit' || box.status === 'occupied') && box.outTime) {
+    const signTime = new Date(box.outTime.getTime() + (3 + Math.floor(Math.random()*10)) * 3600000);
+    events.push({
+      type: 'sign',
+      label: '客户签收',
+      time: signTime,
+      desc: `${box.owner} 已签收，交接凭证 ${box.handoverProof || '—'}`,
+      op: box.responsible.name,
+    });
+  }
+  // 催还（逾期的箱必然有催还历史）
+  if (box.overdueDays && box.overdueDays > 0) {
+    const firstCall = new Date(box.expectBack.getTime() + (1 + Math.floor(Math.random()*6)) * 3600000);
+    events.push({
+      type: 'call',
+      label: '首次催还',
+      time: firstCall,
+      desc: `电话联系 ${box.responsible.name}，提醒回收`,
+      op: '张磊',
+    });
+  }
+  // remarks 里的催还记录并入时间线
+  if (box.remarks && box.remarks.length) {
+    box.remarks.forEach(r => {
+      const labelMap = {
+        '客户仍在使用': '催还·客户仍在使用',
+        '已安排返程':   '催还·已安排返程',
+        '疑似丢失':     '催还·疑似丢失',
+        '未填写':       '催还记录',
+      };
+      events.push({
+        type: 'remark',
+        label: labelMap[r.conclusion] || '催还记录',
+        time: new Date(r.time),
+        desc: r.text || `处置结论：${r.conclusion}`,
+        op: r.op,
+        conclusion: r.conclusion,
+      });
+    });
+  }
+  // 在途箱的返程安排
+  if (box.status === 'in_transit') {
+    events.push({
+      type: 'return_plan',
+      label: '返程待安排',
+      time: new Date(),
+      desc: `预计 ${formatD(box.expectBack)} 前由 ${box.carrier} 带回`,
+      op: '系统',
+    });
+  }
+  // 待返程标记
+  if (box.followStatus === 'returning') {
+    events.push({
+      type: 'return_plan',
+      label: '已安排返程',
+      time: new Date(Date.now() - 3600000),
+      desc: `${box.carrier} ${box.plate} 已确认次日返程带回`,
+      op: '张磊',
+    });
+  }
+  events.sort((a,b) => new Date(a.time) - new Date(b.time));
+  return events;
 }
 
 // 生成箱体数据
 const BOXES = [];
 
-// 在库 58 只（其中 3 只有风险：需校准）
 for (let i = 1; i <= 58; i++) {
   BOXES.push(genBox(i, 'in_stock', { risk: i >= 56 }));
 }
-// 在途 32 只（其中 5 只有风险：超时未签收）
 for (let i = 59; i <= 90; i++) {
   const h = 2 + (i % 48);
   const outT = hoursAgo(h);
   const expBack = new Date(outT.getTime() + 3 * 86400000);
   BOXES.push(genBox(i, 'in_transit', {
-    outTime: outT,
-    expectBack: expBack,
+    outTime: outT, expectBack: expBack,
     handoverProof: `交接单-${String(1000+i)}`,
     risk: (i - 58) <= 5 && h > 36,
   }));
 }
-// 客户占用 45 只（其中 12 只逾期）
+// 客户占用 45 只（其中 12 只逾期），附带默认跟进状态
+let overdueIdx = 0;
+const defaultStatusCycle = ['pending', 'pending', 'contacted', 'contacted', 'returning', 'lost'];
 for (let i = 91; i <= 135; i++) {
   const d = 1 + (i % 15);
   const outT = daysAgo(d);
   const turnover = 2 + (i % 3);
   const expBack = new Date(outT.getTime() + turnover * 86400000);
   const isOverdue = d > turnover;
-  BOXES.push(genBox(i, 'occupied', {
-    outTime: outT,
-    expectBack: expBack,
-    turnoverDays: turnover,
+  const extras = {
+    outTime: outT, expectBack: expBack, turnoverDays: turnover,
     handoverProof: `交接单-${String(2000+i)}`,
     risk: isOverdue,
     overdueDays: isOverdue ? (d - turnover) : 0,
-  }));
+  };
+  if (isOverdue) {
+    extras.followStatus = defaultStatusCycle[overdueIdx % defaultStatusCycle.length];
+    // 已联系/待返程/丢失的箱预填 1 条旧催还记录，用于本地持久化演示
+    if (extras.followStatus !== 'pending') {
+      extras.remarks = [{
+        conclusion: extras.followStatus === 'contacted' ? '客户仍在使用' :
+                    extras.followStatus === 'returning' ? '已安排返程' : '疑似丢失',
+        text: extras.followStatus === 'contacted' ? `客户表示再用 2 天，承诺 ${formatD(daysAgo(-2))} 前归还` :
+              extras.followStatus === 'returning' ? `${CARRIERS[i%5]} 已确认 ${formatD(daysAgo(-1))} 返程带回` :
+              `多次联系 ${RESPONSIBLES[i%8].name} 未接通，货主反馈未见箱体`,
+        time: hoursAgo(6 + overdueIdx * 2).toISOString(),
+        op: i % 2 === 0 ? '张磊' : '李桂芳',
+      }];
+    }
+    overdueIdx++;
+  }
+  BOXES.push(genBox(i, 'occupied', extras));
 }
-// 待清洗 18 只
 for (let i = 136; i <= 153; i++) {
   BOXES.push(genBox(i, 'cleaning', { risk: i >= 150 }));
 }
-// 待维修 7 只
 for (let i = 154; i <= 160; i++) {
   BOXES.push(genBox(i, 'repair', { risk: true }));
 }
 
-// 流转记录
+// 流转记录（仪表盘用）
 const FLOW_LOGS = [
   {boxId:'COLD-0018', action:'入库', plate:'—', owner:'—', time:hoursAgo(0.5), op:'张磊'},
   {boxId:'COLD-0102', action:'签收', plate:'沪A·8G32K', owner:'盒马鲜生', time:hoursAgo(1.2), op:'王建国'},
@@ -123,7 +225,6 @@ const FLOW_LOGS = [
   {boxId:'COLD-0127', action:'签收', plate:'苏B·1M88X', owner:'物美', time:hoursAgo(16.5), op:'王建国'},
 ];
 
-// 状态定义
 const STATUS_DEF = {
   in_stock:  { label: '在库',     color: 'emerald', icon: 'warehouse' },
   in_transit:{ label: '在途',     color: 'blue',    icon: 'truck' },
@@ -132,26 +233,117 @@ const STATUS_DEF = {
   repair:    { label: '待维修',   color: 'rose',    icon: 'wrench' },
 };
 
-function getStatusCount(key) {
-  return BOXES.filter(b => b.status === key).length;
+function getStatusCount(key) { return BOXES.filter(b => b.status === key).length; }
+function getRiskCount(key) { return BOXES.filter(b => b.status === key && b.risk).length; }
+function getRouteBoxes() { return BOXES.filter(b => b.status === 'in_transit' || b.status === 'occupied'); }
+function getOverdueBoxes() { return BOXES.filter(b => b.status === 'occupied' && b.overdueDays && b.overdueDays > 0); }
+
+// ====== 本地持久化：催还记录 + 跟进状态 ======
+const LS_KEY = 'cold_box_persist_v1';
+
+function loadPersist() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw) || {};
+  } catch(e) { return {}; }
 }
-function getRiskCount(key) {
-  return BOXES.filter(b => b.status === key && b.risk).length;
+function savePersist(data) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch(e) {}
+}
+function getPersistMap() {
+  const persist = loadPersist();
+  BOXES.forEach(b => {
+    if (persist[b.id]) {
+      if (persist[b.id].remarks) b.remarks = persist[b.id].remarks.map(r => ({...r, time: new Date(r.time)}));
+      if (persist[b.id].followStatus) b.followStatus = persist[b.id].followStatus;
+    }
+  });
+}
+function setBoxPersist(boxId, patch) {
+  const persist = loadPersist();
+  const cur = persist[boxId] || {};
+  if (patch.remarks !== undefined) cur.remarks = patch.remarks.map(r => ({...r, time: r.time instanceof Date ? r.time.toISOString() : r.time}));
+  if (patch.followStatus !== undefined) cur.followStatus = patch.followStatus;
+  persist[boxId] = cur;
+  savePersist(persist);
+  // 同步到内存对象
+  const b = BOXES.find(x => x.id === boxId);
+  if (b) {
+    if (patch.remarks !== undefined) b.remarks = patch.remarks;
+    if (patch.followStatus !== undefined) b.followStatus = patch.followStatus;
+  }
+}
+function clearAllPersist() {
+  localStorage.removeItem(LS_KEY);
 }
 
-// 线路分组（按车牌聚合在途和占用箱体）
-function getRouteBoxes() {
-  return BOXES.filter(b => b.status === 'in_transit' || b.status === 'occupied');
+// 启动时注入本地存储数据
+getPersistMap();
+
+// 交接班摘要：按今日维度统计
+function getShiftSummary() {
+  const overdue = getOverdueBoxes();
+  const today = new Date();
+  const newlyOverdue = overdue.filter(b => {
+    // 估算：逾期天数 == 1 且 expectBack 为今天的视为"今日新增逾期"
+    if (!b.expectBack) return false;
+    return isSameDay(b.expectBack);
+  });
+  const totalRemarks = [];
+  BOXES.forEach(b => {
+    (b.remarks || []).forEach(r => totalRemarks.push({boxId: b.id, ...r}));
+  });
+  const todayRemarks = totalRemarks.filter(r => r.time && isSameDay(new Date(r.time)));
+  const calledToday = new Set(todayRemarks.map(r => r.boxId)).size;
+  const returningToday = todayRemarks.filter(r => r.conclusion === '已安排返程').length;
+  const lostToday = todayRemarks.filter(r => r.conclusion === '疑似丢失').length;
+  const lostTotal = BOXES.filter(b => b.followStatus === 'lost').length;
+  const returningTotal = BOXES.filter(b => b.followStatus === 'returning').length;
+  return {
+    newlyOverdue: newlyOverdue.length,
+    calledToday: calledToday || Math.max(0, 8 - (today.getHours() < 12 ? 4 : 0)),
+    returningToday: returningToday || 3,
+    returningTotal,
+    lostToday: lostToday || (lostTotal > 0 ? 1 : 0),
+    lostTotal,
+    overdueTotal: overdue.length,
+    pendingTotal: BOXES.filter(b => b.followStatus === 'pending' && b.overdueDays > 0).length,
+    contactedTotal: BOXES.filter(b => b.followStatus === 'contacted' && b.overdueDays > 0).length,
+  };
 }
 
-// 逾期箱体
-function getOverdueBoxes() {
-  return BOXES.filter(b => b.status === 'occupied' && b.overdueDays && b.overdueDays > 0);
+// 生成交接班文字
+function buildShiftText() {
+  const s = getShiftSummary();
+  const now = new Date();
+  const pad = x => String(x).padStart(2, '0');
+  const shift = now.getHours() >= 8 && now.getHours() < 20 ? '早班' : '晚班';
+  return [
+    `【低温箱周转 · ${shift}交接班】${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`,
+    ``,
+    `▸ 当前在库 ${getStatusCount('in_stock')} / 在途 ${getStatusCount('in_transit')} / 客户占用 ${getStatusCount('occupied')} / 待清洗 ${getStatusCount('cleaning')} / 待维修 ${getStatusCount('repair')}`,
+    `▸ 逾期箱体合计 ${s.overdueTotal} 只（待联系 ${s.pendingTotal}，已联系 ${s.contactedTotal}，待返程 ${s.returningTotal}，丢失 ${s.lostTotal}）`,
+    ``,
+    `【今日推进】`,
+    `• 新增逾期：${s.newlyOverdue} 只`,
+    `• 已催还：${s.calledToday} 只`,
+    `• 已安排返程：${s.returningToday} 只（累计待返程 ${s.returningTotal} 只）`,
+    `• 疑似丢失：${s.lostToday} 只（累计丢失 ${s.lostTotal} 只）`,
+    ``,
+    `【接班注意事项】`,
+    `1. 优先处理待联系的 ${s.pendingTotal} 只逾期箱，逐个电话确认`,
+    `2. 待返程 ${s.returningTotal} 只箱，请跟踪 ${PLATES[0]}、${PLATES[1]} 次日卸车`,
+    `${s.lostTotal > 0 ? `3. 丢失 ${s.lostTotal} 只需升级至主管跟进处理\n` : ''}`,
+  ].join('\n');
 }
 
 window.MOCK = {
   BOXES, FLOW_LOGS, STATUS_DEF, CARRIERS, OWNERS, DESTS, PLATES, RESPONSIBLES,
+  FOLLOW_STATUS,
   getStatusCount, getRiskCount, getRouteBoxes, getOverdueBoxes,
-  formatDT, formatD, diffDays, diffHours,
+  formatDT, formatD, diffDays, diffHours, isSameDay,
+  buildTimeline, setBoxPersist, clearAllPersist,
+  getShiftSummary, buildShiftText,
 };
 })();

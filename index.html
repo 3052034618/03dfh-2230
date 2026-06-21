@@ -81,6 +81,31 @@ tailwind.config = {
     <!-- 核心统计卡片 -->
     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6" id="statsGrid"></div>
 
+    <!-- 交接班摘要 -->
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-cold-500 to-cold-700 flex items-center justify-center text-white">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+          </div>
+          <h3 class="font-semibold text-slate-800">交接班摘要</h3>
+          <span class="text-xs text-slate-400" id="shiftClock"></span>
+        </div>
+        <button onclick="copyShiftText()" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-cold-600 text-white text-sm font-medium hover:bg-cold-700 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"/></svg>
+          一键复制交接文字
+        </button>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4" id="shiftMetrics"></div>
+      <div class="p-4 rounded-lg bg-slate-50 border border-slate-100">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-medium text-slate-500">交接文案预览</span>
+          <button onclick="copyShiftText()" class="text-xs text-cold-600 hover:underline">复制</button>
+        </div>
+        <pre id="shiftText" class="text-xs text-slate-700 whitespace-pre-wrap font-sans leading-relaxed"></pre>
+      </div>
+    </div>
+
     <!-- 下方分栏 -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
       <!-- 状态分布 -->
@@ -161,19 +186,25 @@ tailwind.config = {
 
   <!-- ============== 页面3：逾期处理 ============== -->
   <section id="page-overdue" class="page">
-    <div class="flex items-center justify-between mb-5">
+    <div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-3">
       <div>
         <h2 class="text-xl font-bold text-slate-800">逾期箱体处理</h2>
         <p class="text-sm text-slate-500 mt-1">共 <span id="overdueCount" class="font-semibold text-red-600">0</span> 只箱体超出约定周转天数，请优先处理</p>
       </div>
-      <div class="flex gap-2">
+      <div class="flex gap-2 flex-wrap">
         <select id="overdueSort" class="px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-cold-400">
           <option value="days-desc">逾期天数从高到低</option>
           <option value="days-asc">逾期天数从低到高</option>
         </select>
+        <select id="overdueViewGroup" class="px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-cold-400">
+          <option value="group">按跟进状态分组</option>
+          <option value="flat">列表平铺</option>
+        </select>
         <button onclick="exportOverdue()" class="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-sm hover:bg-slate-50">导出清单</button>
       </div>
     </div>
+    <!-- 跟进状态筛选 Tab -->
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-2 mb-4 inline-flex flex-wrap gap-1" id="overdueStatusTabs"></div>
 
     <div id="overdueList" class="space-y-3"></div>
   </section>
@@ -205,6 +236,15 @@ tailwind.config = {
       </button>
     </div>
     <div class="p-5 space-y-4">
+      <div>
+        <label class="text-sm font-medium text-slate-700 block mb-2">更新跟进状态</label>
+        <select id="remarkStatus" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cold-400 bg-white">
+          <option value="pending">待联系</option>
+          <option value="contacted">已联系</option>
+          <option value="returning">待返程</option>
+          <option value="lost">丢失</option>
+        </select>
+      </div>
       <div>
         <label class="text-sm font-medium text-slate-700 block mb-2">处置结论</label>
         <div class="grid grid-cols-3 gap-2">

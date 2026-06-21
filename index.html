@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>低温箱周转看板</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        cold: {
+          50: '#f0f9ff',
+          100: '#e0f2fe',
+          200: '#bae6fd',
+          300: '#7dd3fc',
+          400: '#38bdf8',
+          500: '#0ea5e9',
+          600: '#0284c7',
+          700: '#0369a1',
+          800: '#075985',
+          900: '#0c4a6e',
+        },
+      },
+    },
+  },
+};
+</script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+  .page { display: none; }
+  .page.active { display: block; }
+  .drawer-mask { background: rgba(0,0,0,0.4); }
+  .stat-card:hover { transform: translateY(-2px); transition: transform 0.2s; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .risk-pulse { animation: pulse 2s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+</style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+<!-- 顶部导航栏 -->
+<header class="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="flex items-center justify-between h-16">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-cold-500 to-cold-700 flex items-center justify-center shadow-md">
+          <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+        </div>
+        <div>
+          <h1 class="text-lg font-bold text-slate-800">低温箱周转看板</h1>
+          <p class="text-xs text-slate-500" id="shiftInfo">早班 · 交接班倒计时</p>
+        </div>
+      </div>
+      <nav class="flex gap-1 bg-slate-100 rounded-lg p-1">
+        <button data-page="overview" class="nav-btn px-4 py-2 rounded-md text-sm font-medium transition-colors">箱体总览</button>
+        <button data-page="route" class="nav-btn px-4 py-2 rounded-md text-sm font-medium transition-colors">线路明细</button>
+        <button data-page="overdue" class="nav-btn px-4 py-2 rounded-md text-sm font-medium transition-colors">逾期处理</button>
+      </nav>
+      <div class="flex items-center gap-3">
+        <span class="text-xs text-slate-500" id="currentTime"></span>
+        <div class="w-8 h-8 rounded-full bg-cold-100 flex items-center justify-center text-cold-700 text-sm font-bold">张</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+  <!-- ============== 页面1：箱体总览 ============== -->
+  <section id="page-overview" class="page active">
+    <!-- 顶部交接班提示条 -->
+    <div id="alertBar" class="mb-5 p-4 rounded-xl border flex items-center gap-3"></div>
+
+    <!-- 核心统计卡片 -->
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6" id="statsGrid"></div>
+
+    <!-- 下方分栏 -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <!-- 状态分布 -->
+      <div class="lg:col-span-2 bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-semibold text-slate-800">状态实时分布</h3>
+          <span class="text-xs text-slate-400" id="updateTime"></span>
+        </div>
+        <div id="statusBars" class="space-y-3"></div>
+      </div>
+      <!-- 风险预警 -->
+      <div class="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+        <h3 class="font-semibold text-slate-800 mb-4 flex items-center gap-2">
+          <span class="status-dot bg-red-500 risk-pulse"></span>风险预警 TOP
+        </h3>
+        <div id="riskList" class="space-y-3"></div>
+      </div>
+    </div>
+
+    <!-- 最近流转 -->
+    <div class="mt-5 bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+      <h3 class="font-semibold text-slate-800 mb-4">最近流转记录</h3>
+      <div class="overflow-x-auto scrollbar-thin">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-slate-500 text-xs uppercase">
+            <tr>
+              <th class="px-4 py-3 text-left font-medium">箱号</th>
+              <th class="px-4 py-3 text-left font-medium">动作</th>
+              <th class="px-4 py-3 text-left font-medium">车牌</th>
+              <th class="px-4 py-3 text-left font-medium">货主</th>
+              <th class="px-4 py-3 text-left font-medium">时间</th>
+              <th class="px-4 py-3 text-left font-medium">操作人</th>
+            </tr>
+          </thead>
+          <tbody id="recentFlow" class="divide-y divide-slate-100"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== 页面2：线路明细 ============== -->
+  <section id="page-route" class="page">
+    <!-- 筛选栏 -->
+    <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-200 mb-5">
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3">
+        <div>
+          <label class="text-xs text-slate-500 block mb-1">车牌号码</label>
+          <input id="f-plate" type="text" placeholder="例：沪A·12345" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cold-400 focus:border-transparent" />
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 block mb-1">承运商</label>
+          <select id="f-carrier" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cold-400 bg-white">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 block mb-1">货主</label>
+          <select id="f-owner" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cold-400 bg-white">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 block mb-1">目的地</label>
+          <select id="f-dest" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cold-400 bg-white">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div class="flex items-end gap-2">
+          <button onclick="applyFilters()" class="flex-1 px-4 py-2 bg-cold-600 text-white rounded-lg text-sm font-medium hover:bg-cold-700 transition-colors">查询</button>
+          <button onclick="resetFilters()" class="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-sm hover:bg-slate-50 transition-colors">重置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 线路分组 -->
+    <div id="routeGroups" class="space-y-4"></div>
+  </section>
+
+  <!-- ============== 页面3：逾期处理 ============== -->
+  <section id="page-overdue" class="page">
+    <div class="flex items-center justify-between mb-5">
+      <div>
+        <h2 class="text-xl font-bold text-slate-800">逾期箱体处理</h2>
+        <p class="text-sm text-slate-500 mt-1">共 <span id="overdueCount" class="font-semibold text-red-600">0</span> 只箱体超出约定周转天数，请优先处理</p>
+      </div>
+      <div class="flex gap-2">
+        <select id="overdueSort" class="px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-cold-400">
+          <option value="days-desc">逾期天数从高到低</option>
+          <option value="days-asc">逾期天数从低到高</option>
+        </select>
+        <button onclick="exportOverdue()" class="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-sm hover:bg-slate-50">导出清单</button>
+      </div>
+    </div>
+
+    <div id="overdueList" class="space-y-3"></div>
+  </section>
+
+</main>
+
+<!-- ============ 箱号详情抽屉 ============ -->
+<div id="drawer" class="fixed inset-0 z-50 hidden">
+  <div class="drawer-mask absolute inset-0" onclick="closeDrawer()"></div>
+  <div class="absolute right-0 top-0 bottom-0 w-full max-w-lg bg-white shadow-2xl flex flex-col">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+      <h3 class="font-bold text-lg text-slate-800" id="drawerTitle">箱号详情</h3>
+      <button onclick="closeDrawer()" class="w-8 h-8 rounded-md hover:bg-slate-100 flex items-center justify-center text-slate-400 hover:text-slate-600">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="drawerBody" class="flex-1 overflow-y-auto p-5 scrollbar-thin"></div>
+  </div>
+</div>
+
+<!-- ============ 备注弹窗 ============ -->
+<div id="remarkModal" class="fixed inset-0 z-50 hidden items-center justify-center">
+  <div class="absolute inset-0 bg-black/40" onclick="closeRemarkModal()"></div>
+  <div class="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4">
+    <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+      <h3 class="font-bold text-slate-800">记录催还结果</h3>
+      <button onclick="closeRemarkModal()" class="text-slate-400 hover:text-slate-600">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="p-5 space-y-4">
+      <div>
+        <label class="text-sm font-medium text-slate-700 block mb-2">处置结论</label>
+        <div class="grid grid-cols-3 gap-2">
+          <label class="conclusion-opt cursor-pointer">
+            <input type="radio" name="conclusion" value="客户仍在使用" class="hidden peer" />
+            <div class="px-3 py-2 border border-slate-200 rounded-lg text-sm text-center peer-checked:bg-cold-50 peer-checked:border-cold-500 peer-checked:text-cold-700 hover:bg-slate-50">客户仍在使用</div>
+          </label>
+          <label class="conclusion-opt cursor-pointer">
+            <input type="radio" name="conclusion" value="已安排返程" class="hidden peer" />
+            <div class="px-3 py-2 border border-slate-200 rounded-lg text-sm text-center peer-checked:bg-green-50 peer-checked:border-green-500 peer-checked:text-green-700 hover:bg-slate-50">已安排返程</div>
+          </label>
+          <label class="conclusion-opt cursor-pointer">
+            <input type="radio" name="conclusion" value="疑似丢失" class="hidden peer" />
+            <div class="px-3 py-2 border border-slate-200 rounded-lg text-sm text-center peer-checked:bg-red-50 peer-checked:border-red-500 peer-checked:text-red-700 hover:bg-slate-50">疑似丢失</div>
+          </label>
+        </div>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-slate-700 block mb-2">催还备注</label>
+        <textarea id="remarkText" rows="4" placeholder="记录沟通内容、预计回收时间等..." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cold-400 resize-none"></textarea>
+      </div>
+    </div>
+    <div class="px-5 py-4 border-t border-slate-200 flex justify-end gap-2">
+      <button onclick="closeRemarkModal()" class="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-sm hover:bg-slate-50">取消</button>
+      <button onclick="saveRemark()" class="px-4 py-2 bg-cold-600 text-white rounded-lg text-sm font-medium hover:bg-cold-700">保存记录</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="fixed top-20 left-1/2 -translate-x-1/2 z-[60] hidden px-5 py-3 rounded-lg shadow-lg text-sm text-white"></div>
+
+<script src="mockData.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
